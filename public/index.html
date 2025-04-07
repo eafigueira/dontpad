@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>Editor colaborativo simples</title>
+  <title>Meu dontpad</title>
   <style>
     body {
       font-family: sans-serif;
@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <h1>Editor de texto compartilhado</h1>
+  <h1>Escreva o texto aqui</h1>
   <textarea id="editor" placeholder="Digite aqui..."></textarea>
 
   <script>
@@ -30,6 +30,17 @@
         ? "wss://" + window.location.host
         : "ws://" + window.location.host
     );
+
+    ws.onclose = () => {
+      console.warn("WebSocket desconectado. Tentando reconectar...");
+      setTimeout(() => location.reload(), 3000);
+    };
+
+    setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 25000); // a cada 25 segundos
 
     let isUpdating = false;
 
@@ -47,6 +58,7 @@
         ws.send(JSON.stringify({ type: "update", text: textarea.value }));
       }
     });
+
   </script>
 </body>
 </html>

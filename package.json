@@ -2,15 +2,22 @@
   "name": "code-mirror",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "bin": "launcher.js",
+  "pkg": {
+    "scripts": ["server.js"],
+    "assets": ["public/**/*"],
+    "targets": ["node18-win-x64"],
+    "output": "editor.exe",
+    "win": {
+      "window": true
+    }
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "express": "^5.1.0",
+    "localtunnel": "^2.0.2",
     "ws": "^8.18.1"
   }
 }
