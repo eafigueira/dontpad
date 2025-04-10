@@ -4,7 +4,6 @@
   "description": "",
   "bin": "launcher.js",
   "pkg": {
-    "scripts": ["server.js"],
     "assets": ["public/**/*"],
     "targets": ["node18-win-x64"],
     "output": "editor.exe",
