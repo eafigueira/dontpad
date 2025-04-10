@@ -4,31 +4,35 @@
   <meta charset="UTF-8">
   <title>Meu dontpad</title>
   <style>
-    body {
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
       font-family: sans-serif;
-      padding: 1rem;
     }
-
-    textarea {
-      width: 100%;
-      height: 80vh;
-      font-family: monospace;
-      font-size: 1rem;
+    #topbar {
       padding: 1rem;
+      background: #1e1e1e;
+      color: white;
+      font-size: 1.2rem;
+    }
+    #editor {
+      height: calc(100% - 60px);
     }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
 </head>
 <body>
-  <h1>Escreva o texto aqui</h1>
-  <textarea id="editor" placeholder="Digite aqui..."></textarea>
+  <div id="topbar">📝 Meu dontpad</div>
+  <div id="editor"></div>
 
   <script>
-    const textarea = document.getElementById("editor");
+    let editor;
+    let isUpdating = false;
 
+    // WebSocket
     const ws = new WebSocket(
-      window.location.protocol === "https:"
-        ? "wss://" + window.location.host
-        : "ws://" + window.location.host
+      window.location.protocol === "https:" ? "wss://" + window.location.host : "ws://" + window.location.host
     );
 
     ws.onclose = () => {
@@ -40,25 +44,39 @@
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' }));
       }
-    }, 25000); // a cada 25 segundos
+    }, 25000); // ping a cada 25s
 
-    let isUpdating = false;
+    // Carregar Monaco
+    require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' } });
+    require(["vs/editor/editor.main"], function () {
+      editor = monaco.editor.create(document.getElementById('editor'), {
+        value: "",
+        language: "javascript", // você pode trocar ou fazer dinâmico
+        theme: "vs-dark",
+        fontSize: 16,
+        automaticLayout: true
+      });
 
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.type === "init" || msg.type === "update") {
-        isUpdating = true;
-        textarea.value = msg.text;
-        isUpdating = false;
-      }
-    };
+      // Enviar alterações
+      editor.onDidChangeModelContent(() => {
+        if (!isUpdating && ws.readyState === WebSocket.OPEN) {
+          const text = editor.getValue();
+          ws.send(JSON.stringify({ type: "update", text }));
+        }
+      });
 
-    textarea.addEventListener("input", () => {
-      if (!isUpdating) {
-        ws.send(JSON.stringify({ type: "update", text: textarea.value }));
-      }
+      // Receber conteúdo
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "init" || msg.type === "update") {
+          if (editor) {
+            isUpdating = true;
+            editor.setValue(msg.text);
+            isUpdating = false;
+          }
+        }
+      };
     });
-
   </script>
 </body>
 </html>
