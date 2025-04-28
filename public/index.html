@@ -9,28 +9,75 @@
       padding: 0;
       height: 100%;
       font-family: sans-serif;
-    }
-    #topbar {
-      padding: 1rem;
       background: #1e1e1e;
       color: white;
-      font-size: 1.2rem;
+    }
+    #topbar {
+      display: flex;
+      align-items: center;
+      padding: 0.5rem 1rem;
+      background: #333;
+      font-size: 1rem;
+      gap: 1rem;
+    }
+    #fileInput {
+      display: none;
+    }
+    #uploadBtn {
+      padding: 0.3rem 0.7rem;
+      background: #4CAF50;
+      border: none;
+      color: white;
+      cursor: pointer;
+      border-radius: 5px;
+    }
+    #fileList {
+      flex: 1;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    .file-item {
+      display: inline-flex;
+      align-items: center;
+      margin-right: 10px;
+      background: #222;
+      padding: 0.2rem 0.5rem;
+      border-radius: 5px;
+    }
+    .file-item a {
+      color: #00bfff;
+      text-decoration: none;
+      margin-right: 5px;
+    }
+    .delete-btn {
+      background: transparent;
+      color: red;
+      border: none;
+      cursor: pointer;
+      font-size: 1rem;
     }
     #editor {
-      height: calc(100% - 60px);
+      height: calc(100% - 50px);
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
 </head>
 <body>
-  <div id="topbar">📝 Meu dontpad</div>
+  <div id="topbar">
+    <button id="uploadBtn">📤 Upload</button>
+    <input type="file" id="fileInput">
+    <div id="fileList"></div>
+  </div>
   <div id="editor"></div>
 
   <script>
     let editor;
     let isUpdating = false;
 
-    // WebSocket
+    const uploadBtn = document.getElementById('uploadBtn');
+    const fileInput = document.getElementById('fileInput');
+    const fileList = document.getElementById('fileList');
+
     const ws = new WebSocket(
       window.location.protocol === "https:" ? "wss://" + window.location.host : "ws://" + window.location.host
     );
@@ -40,43 +87,110 @@
       setTimeout(() => location.reload(), 3000);
     };
 
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "init" || msg.type === "update") {
+        if (editor) {
+          isUpdating = true;
+          editor.setValue(msg.text);
+          isUpdating = false;
+        }
+      }
+      if (msg.type === "filesUpdated") {
+        console.log('📂 Atualizando lista de arquivos...');
+        loadFileList();
+      }
+    };
+
     setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' }));
       }
-    }, 25000); // ping a cada 25s
+    }, 25000);
 
-    // Carregar Monaco
+    uploadBtn.addEventListener('click', () => {
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const response = await fetch('/upload', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (response.ok) {
+          alert('Arquivo enviado com sucesso!');
+          fileInput.value = '';
+          // Não precisa chamar loadFileList aqui, o servidor manda via WS
+        } else {
+          alert('Erro ao enviar o arquivo.');
+        }
+      } catch (error) {
+        alert('Erro ao enviar o arquivo.');
+        console.error(error);
+      }
+    });
+
     require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' } });
     require(["vs/editor/editor.main"], function () {
       editor = monaco.editor.create(document.getElementById('editor'), {
         value: "",
-        language: "javascript", // você pode trocar ou fazer dinâmico
+        language: "javascript",
         theme: "vs-dark",
         fontSize: 16,
         automaticLayout: true
       });
 
-      // Enviar alterações
       editor.onDidChangeModelContent(() => {
         if (!isUpdating && ws.readyState === WebSocket.OPEN) {
           const text = editor.getValue();
           ws.send(JSON.stringify({ type: "update", text }));
         }
       });
-
-      // Receber conteúdo
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "init" || msg.type === "update") {
-          if (editor) {
-            isUpdating = true;
-            editor.setValue(msg.text);
-            isUpdating = false;
-          }
-        }
-      };
     });
+
+    async function loadFileList() {
+      try {
+        const response = await fetch('/uploads');
+        const files = await response.json();
+        fileList.innerHTML = '';
+
+        files.forEach(file => {
+          const item = document.createElement('div');
+          item.className = 'file-item';
+
+          const link = document.createElement('a');
+          link.href = `/uploads/${file}`;
+          link.textContent = file;
+          link.target = '_blank';
+
+          const delBtn = document.createElement('button');
+          delBtn.className = 'delete-btn';
+          delBtn.textContent = '🗑️';
+          delBtn.onclick = async () => {
+            if (confirm(`Deseja excluir o arquivo "${file}"?`)) {
+              await fetch(`/uploads/${file}`, { method: 'DELETE' });
+              // Não precisa chamar loadFileList aqui, o servidor manda via WS
+            }
+          };
+
+          item.appendChild(link);
+          item.appendChild(delBtn);
+          fileList.appendChild(item);
+        });
+      } catch (err) {
+        console.error('Erro ao carregar arquivos:', err);
+      }
+    }
+
+    loadFileList();
   </script>
 </body>
 </html>
