@@ -143,8 +143,16 @@ app.post('/upload', upload.single('file'), (req, res) => {
 });
 
 app.get('/uploads', (req, res) => {
-  fs.readdir(uploadFolder, (err, files) => {
-    if (err) return res.status(500).json([]);
+  fs.readdir(uploadFolder, { withFileTypes: true }, (err, entries) => {
+    if (err) {
+      console.error('Erro ao listar uploads:', err);
+      return res.status(500).json([]);
+    }
+
+    const files = entries
+      .filter(entry => entry.isFile() && !entry.name.startsWith('.'))
+      .map(entry => entry.name);
+
     res.json(files);
   });
 });
