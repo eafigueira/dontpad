@@ -113,13 +113,17 @@ process.on('SIGINT', () => {
   setTimeout(() => process.exit(0), 1000);
 });
 
+const isPkg = typeof process.pkg !== 'undefined';
+
 // --- Configurações Express ---
 const app = express();
-const uploadFolder = path.join(__dirname, 'uploads');
+const uploadFolder = isPkg
+  ? path.join(process.cwd(), 'uploads')
+  : path.join(__dirname, 'uploads');
 
-if (!fs.existsSync(uploadFolder)) {
-  fs.mkdirSync(uploadFolder);
-}
+  if (!fs.existsSync(uploadFolder)) {
+    fs.mkdirSync(uploadFolder, { recursive: true });
+  }
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadFolder),
@@ -207,6 +211,17 @@ interval = setInterval(() => {
 
 // --- Inicia o túnel LocalTunnel ---
 async function startTunnel() {
+  if (tunnelInstance) {
+    try {
+      console.log('🔌 Fechando túnel anterior...');
+      await tunnelInstance.close();
+    } catch (e) {
+      console.warn('⚠️ Falha ao fechar túnel antigo.');
+    }
+    tunnelInstance = null;
+    await new Promise(resolve => setTimeout(resolve, 2000)); // espera 2 segundos
+  }
+
   try {
     tunnelInstance = await localtunnel({ port: PORT, subdomain: SUBDOMAIN });
     console.log(`🌐 Tunnel ativo: ${tunnelInstance.url}`);
@@ -221,7 +236,7 @@ async function startTunnel() {
 
     tunnelInstance.on('close', () => {
       if (!shuttingDown) {
-        console.warn('⛔ Tunnel foi fechado. Reconectando...');
+        console.warn('⛔ Tunnel foi fechado. Reconectando em 5s...');
         setTimeout(startTunnel, 5000);
       }
     });
