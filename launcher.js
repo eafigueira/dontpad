@@ -151,10 +151,17 @@ app.get('/uploads', (req, res) => {
 
 app.delete('/uploads/:filename', (req, res) => {
   const filename = req.params.filename;
-  const filepath = path.join(uploadFolder, filename);
+  const filepath = path.normalize(path.join(uploadFolder, filename));
+
+  if (!filepath.startsWith(uploadFolder)) {
+    console.warn('⚠️ Tentativa de acesso fora da pasta de uploads detectada:', filepath);
+    return res.status(400).send('Caminho inválido.');
+  }
+
   if (!fs.existsSync(filepath)) {
     return res.status(404).send('Arquivo não encontrado.');
   }
+
   fs.unlink(filepath, (err) => {
     if (err) {
       console.error('Erro ao excluir arquivo:', err);
