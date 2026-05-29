@@ -20,6 +20,24 @@
       font-size: 1rem;
       gap: 1rem;
     }
+    #connectionStatus {
+      font-size: 0.85rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+    #connectionStatus.connected {
+      background: #1b5e20;
+      color: #c8e6c9;
+    }
+    #connectionStatus.reconnecting {
+      background: #5d4037;
+      color: #ffe0b2;
+    }
+    #connectionStatus.disconnected {
+      background: #b71c1c;
+      color: #ffcdd2;
+    }
     #fileInput {
       display: none;
     }
@@ -30,6 +48,41 @@
       color: white;
       cursor: pointer;
       border-radius: 5px;
+      white-space: nowrap;
+    }
+    #uploadBtn:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
+    }
+    #uploadProgress {
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      min-width: 140px;
+      flex: 0 1 220px;
+    }
+    #uploadProgress.visible {
+      display: flex;
+    }
+    .upload-progress-track {
+      flex: 1;
+      height: 8px;
+      background: #222;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .upload-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #4CAF50, #8BC34A);
+      border-radius: 4px;
+      transition: width 0.15s ease;
+    }
+    .upload-progress-label {
+      font-size: 0.8rem;
+      color: #ccc;
+      min-width: 3.5rem;
+      text-align: right;
     }
     #fileList {
       flex: 1;
@@ -64,7 +117,14 @@
 </head>
 <body>
   <div id="topbar">
+    <span id="connectionStatus" class="reconnecting">Conectando…</span>
     <button id="uploadBtn">📤 Upload</button>
+    <div id="uploadProgress" aria-live="polite">
+      <div class="upload-progress-track">
+        <div class="upload-progress-bar" id="uploadProgressBar"></div>
+      </div>
+      <span class="upload-progress-label" id="uploadProgressLabel">0%</span>
+    </div>
     <input type="file" id="fileInput">
     <div id="fileList"></div>
   </div>
@@ -73,37 +133,230 @@
   <script>
     let editor;
     let isUpdating = false;
+    let ws;
+    let reconnectTimer = null;
+    let reconnectAttempt = 0;
+    let updateDebounceTimer = null;
+    let uploadWaiter = null;
+    const MAX_RECONNECT_DELAY = 30000;
+    const MAX_UPLOAD_MB = 50;
+    const WS_CHUNK_SIZE = 256 * 1024;
 
     const uploadBtn = document.getElementById('uploadBtn');
     const fileInput = document.getElementById('fileInput');
     const fileList = document.getElementById('fileList');
+    const connectionStatus = document.getElementById('connectionStatus');
+    const uploadProgressEl = document.getElementById('uploadProgress');
+    const uploadProgressBar = document.getElementById('uploadProgressBar');
+    const uploadProgressLabel = document.getElementById('uploadProgressLabel');
 
-    const ws = new WebSocket(
-      window.location.protocol === "https:" ? "wss://" + window.location.host : "ws://" + window.location.host
-    );
+    function setUploadProgress(percent, detail) {
+      const p = Math.max(0, Math.min(100, Math.round(percent)));
+      uploadProgressBar.style.width = p + '%';
+      uploadProgressLabel.textContent = detail ? `${p}% · ${detail}` : `${p}%`;
+    }
 
-    ws.onclose = () => {
-      console.warn("WebSocket desconectado. Tentando reconectar...");
-      setTimeout(() => location.reload(), 3000);
-    };
+    function showUploadProgress() {
+      uploadProgressEl.classList.add('visible');
+      setUploadProgress(0);
+    }
 
-    ws.onmessage = (event) => {
+    function hideUploadProgress() {
+      uploadProgressEl.classList.remove('visible');
+      setUploadProgress(0);
+    }
+
+    function newUploadId() {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      return `up-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+
+    function setConnectionStatus(state, delayMs) {
+      connectionStatus.className = state;
+      if (state === 'connected') {
+        connectionStatus.textContent = '● Online';
+      } else if (state === 'reconnecting') {
+        const sec = delayMs ? Math.round(delayMs / 1000) : '?';
+        connectionStatus.textContent = `↻ Reconectando em ${sec}s…`;
+      } else {
+        connectionStatus.textContent = '○ Offline';
+      }
+    }
+
+    function getWsUrl() {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${proto}//${window.location.host}`;
+    }
+
+    function handleWsMessage(event) {
       const msg = JSON.parse(event.data);
-      if (msg.type === "init" || msg.type === "update") {
+      if (msg.type === 'init' || msg.type === 'update') {
         if (editor) {
           isUpdating = true;
           editor.setValue(msg.text);
           isUpdating = false;
         }
       }
-      if (msg.type === "filesUpdated") {
-        console.log('📂 Atualizando lista de arquivos...');
+      if (msg.type === 'filesUpdated') {
         loadFileList();
       }
-    };
+      if (msg.type === 'uploadProgress' && uploadWaiter && msg.id === uploadWaiter.id) {
+        setUploadProgress(msg.percent, 'servidor');
+      }
+      if (msg.type === 'uploadDone' && uploadWaiter && (!msg.id || msg.id === uploadWaiter.id)) {
+        clearTimeout(uploadWaiter.timeout);
+        if (msg.ok) {
+          setUploadProgress(100, 'concluído');
+          uploadWaiter.resolve(msg.filename);
+        } else {
+          uploadWaiter.reject(new Error(msg.error || 'Falha no upload.'));
+        }
+        uploadWaiter = null;
+      }
+    }
+
+    function readBlobAsBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result;
+          resolve(result.includes(',') ? result.split(',')[1] : result);
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    function waitForWsOpen() {
+      if (ws && ws.readyState === WebSocket.OPEN) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('WebSocket não conectado.')), 10000);
+        const check = setInterval(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            clearInterval(check);
+            clearTimeout(timeout);
+            resolve();
+          }
+        }, 100);
+      });
+    }
+
+    function uploadViaWebSocket(file) {
+      return new Promise(async (resolve, reject) => {
+        const id = newUploadId();
+        const totalChunks = Math.max(1, Math.ceil(file.size / WS_CHUNK_SIZE));
+
+        const timeout = setTimeout(() => {
+          uploadWaiter = null;
+          reject(new Error('Tempo esgotado no upload.'));
+        }, 10 * 60 * 1000);
+
+        uploadWaiter = { resolve, reject, timeout, id };
+
+        try {
+          await waitForWsOpen();
+
+          ws.send(JSON.stringify({
+            type: 'uploadStart',
+            id,
+            name: file.name,
+            size: file.size,
+            totalChunks,
+          }));
+
+          for (let index = 0; index < totalChunks; index++) {
+            const start = index * WS_CHUNK_SIZE;
+            const chunk = file.slice(start, start + WS_CHUNK_SIZE);
+            const data = await readBlobAsBase64(chunk);
+            ws.send(JSON.stringify({ type: 'uploadChunk', id, index, data }));
+
+            const sentPercent = Math.round(((index + 1) / totalChunks) * 85);
+            setUploadProgress(sentPercent, `enviando ${index + 1}/${totalChunks}`);
+          }
+
+          setUploadProgress(90, 'finalizando');
+          ws.send(JSON.stringify({ type: 'uploadEnd', id }));
+        } catch (e) {
+          clearTimeout(timeout);
+          uploadWaiter = null;
+          reject(e);
+        }
+      });
+    }
+
+    function uploadViaHttp(file) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const formData = new FormData();
+        formData.append('file', file);
+
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            setUploadProgress(Math.round((e.loaded / e.total) * 100), 'enviando');
+          }
+        });
+
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            setUploadProgress(100, 'concluído');
+            resolve();
+          } else {
+            reject(new Error(xhr.responseText || 'Erro no upload HTTP.'));
+          }
+        });
+
+        xhr.addEventListener('error', () => reject(new Error('Falha de rede no upload.')));
+        xhr.addEventListener('abort', () => reject(new Error('Upload cancelado.')));
+
+        xhr.open('POST', '/upload');
+        xhr.send(formData);
+      });
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY);
+      reconnectAttempt++;
+      setConnectionStatus('reconnecting', delay);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectWebSocket();
+      }, delay);
+    }
+
+    function connectWebSocket() {
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+      }
+
+      setConnectionStatus('reconnecting', 0);
+      ws = new WebSocket(getWsUrl());
+
+      ws.onopen = () => {
+        reconnectAttempt = 0;
+        setConnectionStatus('connected');
+      };
+
+      ws.onmessage = handleWsMessage;
+
+      ws.onclose = () => {
+        setConnectionStatus('disconnected');
+        scheduleReconnect();
+      };
+
+      ws.onerror = () => {
+        setConnectionStatus('disconnected');
+      };
+    }
 
     setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' }));
       }
     }, 25000);
@@ -116,44 +369,52 @@
       const file = fileInput.files[0];
       if (!file) return;
 
-      const formData = new FormData();
-      formData.append('file', file);
+      if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+        alert(`Arquivo maior que ${MAX_UPLOAD_MB} MB.`);
+        fileInput.value = '';
+        return;
+      }
+
+      uploadBtn.disabled = true;
+      showUploadProgress();
 
       try {
-        const response = await fetch('/upload', {
-          method: 'POST',
-          body: formData
-        });
-
-        if (response.ok) {
-          alert('Arquivo enviado com sucesso!');
-          fileInput.value = '';
-          // Não precisa chamar loadFileList aqui, o servidor manda via WS
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          await uploadViaWebSocket(file);
         } else {
-          alert('Erro ao enviar o arquivo.');
+          await uploadViaHttp(file);
         }
+        alert('Arquivo enviado com sucesso!');
+        fileInput.value = '';
       } catch (error) {
-        alert('Erro ao enviar o arquivo.');
+        alert('Erro ao enviar: ' + (error.message || error));
         console.error(error);
+      } finally {
+        uploadBtn.disabled = false;
+        hideUploadProgress();
       }
     });
 
     require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' } });
-    require(["vs/editor/editor.main"], function () {
+    require(['vs/editor/editor.main'], function () {
       editor = monaco.editor.create(document.getElementById('editor'), {
-        value: "",
-        language: "javascript",
-        theme: "vs-dark",
+        value: '',
+        language: 'javascript',
+        theme: 'vs-dark',
         fontSize: 16,
         automaticLayout: true
       });
 
       editor.onDidChangeModelContent(() => {
-        if (!isUpdating && ws.readyState === WebSocket.OPEN) {
-          const text = editor.getValue();
-          ws.send(JSON.stringify({ type: "update", text }));
+        if (!isUpdating && ws && ws.readyState === WebSocket.OPEN) {
+          clearTimeout(updateDebounceTimer);
+          updateDebounceTimer = setTimeout(() => {
+            ws.send(JSON.stringify({ type: 'update', text: editor.getValue() }));
+          }, 200);
         }
       });
+
+      connectWebSocket();
     });
 
     async function loadFileList() {
@@ -177,7 +438,6 @@
           delBtn.onclick = async () => {
             if (confirm(`Deseja excluir o arquivo "${file}"?`)) {
               await fetch(`/uploads/${file}`, { method: 'DELETE' });
-              // Não precisa chamar loadFileList aqui, o servidor manda via WS
             }
           };
 
